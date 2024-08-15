@@ -180,12 +180,12 @@ To avoid ongoing charges, follow these steps:
 
 To allow network administrators to customise the VPC template in this post based on your organization requirements, this section will provide more information about other networking solutions that can be integrated with the sample VPC template in this blog based on the organization requirements:
 
-- Centralised egress and inspections with either AWS Network Firewall or Gateway Load Balancer can be achieved by adding static routes in the Transit Gateway and Subnet route tables.
+- [Centralised egress and inspections with either AWS Network Firewall or Gateway Load Balancer](https://docs.aws.amazon.com/whitepapers/latest/building-scalable-secure-multi-vpc-network-infrastructure/centralized-egress-to-internet.html) can be achieved by adding static routes in the Transit Gateway and Subnet route tables.
 - Hybrid and multi-account DNS: 
-- - These AWS DNS Whitepaper and AWS Prescriptive Guidance provides insight on the different multi-account and hybrid DNS management patterns. 
-- - - Route 53 Profiles can be used to share Private Hosted Zonesand DNS Resolver Rules with the spoke VPCs, for more information on how this can be used, please refer to Using Amazon Route 53 Profiles for scalable multi-account AWS environments.
+- - These AWS DNS [Whitepaper](https://docs.aws.amazon.com/whitepapers/latest/hybrid-cloud-dns-options-for-vpc/scaling-dns-management-across-multiple-accounts-and-vpcs.html) and [AWS Prescriptive Guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/set-up-dns-resolution-for-hybrid-networks-in-a-multi-account-aws-environment.html) provides insight on the different multi-account and hybrid DNS management patterns. 
+- - - [Route 53 Profiles](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/profiles.html) can be used to share [Private Hosted Zones](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/hosted-zones-private.html) and [DNS Resolver Rules](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-forwarding-outbound-queries.html) with the spoke VPCs, for more information on how this can be used, please refer to [Using Amazon Route 53 Profiles for scalable multi-account AWS environments](https://aws.amazon.com/blogs/networking-and-content-delivery/using-amazon-route-53-profiles-for-scalable-multi-account-aws-environments/).
 - - To automate the spoke Private Hosted Zone association with the Hub VPC, refer to Deploy consistent DNS with AWS Service Catalog and AWS Control Tower customizations for code samples.
-- Centralised VPC interface endpoints can be achieved by deploying VPC interface endpoints in the hub VPC, combining with DNS resolver rule shared with the spoke accounts.
+- [Centralised VPC interface endpoints](https://aws.amazon.com/blogs/networking-and-content-delivery/centralize-access-using-vpc-interface-endpoints/) can be achieved by deploying VPC interface endpoints in the hub VPC, combining with DNS resolver rule shared with the spoke accounts.
 
 ## Security
 
