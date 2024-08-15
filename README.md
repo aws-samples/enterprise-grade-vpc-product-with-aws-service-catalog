@@ -165,16 +165,16 @@ You can then log into an AWS account that has access to the shared Service Catal
 To avoid ongoing charges, follow these steps:
 
 - In the test Workload Account(s):
-- - Go to Service Catalog Provisioned products, and terminate the associated provisioned product(s). This deletes the VPC and other associated resources, including the Transit Gateway Attachments
-- - Go to CloudFormation, and delete the "network-orchestration-spoke-service-linked-roles" stack
+    - Go to Service Catalog Provisioned products, and terminate the associated provisioned product(s). This deletes the VPC and other associated resources, including the Transit Gateway Attachments
+    - Go to CloudFormation, and delete the "network-orchestration-spoke-service-linked-roles" stack
 - In the Network Account:
-- - Go to Service Catalog, Portfolios, click on “VPC”, go to the “Share” tab, and select the items in the list, and click on Actions -> Unshare.
-- - Go to CloudFormation, and delete the “VPC-Service-Catalog” stack. 
-- - Go to S3, select the bucket starting with “vpc-sc-bucket”, click on “Empty”, and empty the bucket.
-- - (if using default VPC flow log bucket) Go to S3, select the bucket starting with “vpc-flow-logs”, click on “Empty”, and empty the bucket.
-- - Go to CloudFormation, and delete the following stacks: 1) VPC-SC-Bucket, 2) VPC-Flow-Log-Bucket, 3) IPAM 4) network-orchestration-hub 5) network-orchestration-spoke 6) Subnet-Calculator 7) VPC-Service-Catalog
+    - Go to Service Catalog, Portfolios, click on “VPC”, go to the “Share” tab, and select the items in the list, and click on Actions -> Unshare.
+    - Go to CloudFormation, and delete the “VPC-Service-Catalog” stack. 
+    - Go to S3, select the bucket starting with “vpc-sc-bucket”, click on “Empty”, and empty the bucket.
+    - (if using default VPC flow log bucket) Go to S3, select the bucket starting with “vpc-flow-logs”, click on “Empty”, and empty the bucket.
+    - Go to CloudFormation, and delete the following stacks: 1) VPC-SC-Bucket, 2) VPC-Flow-Log-Bucket, 3) IPAM 4) network-orchestration-hub 5) network-orchestration-spoke 6) Subnet-Calculator 7) VPC-Service-Catalog
 - In the Management Account:
-- - Go to CloudFormation, and delete the “network-orchestration-organization-role” stack
+    - Go to CloudFormation, and delete the “network-orchestration-organization-role” stack
 
 ## Next Steps
 
@@ -182,9 +182,9 @@ To allow network administrators to customise the VPC template in this post based
 
 - [Centralised egress and inspections with either AWS Network Firewall or Gateway Load Balancer](https://docs.aws.amazon.com/whitepapers/latest/building-scalable-secure-multi-vpc-network-infrastructure/centralized-egress-to-internet.html) can be achieved by adding static routes in the Transit Gateway and Subnet route tables.
 - Hybrid and multi-account DNS: 
-- - These AWS DNS [Whitepaper](https://docs.aws.amazon.com/whitepapers/latest/hybrid-cloud-dns-options-for-vpc/scaling-dns-management-across-multiple-accounts-and-vpcs.html) and [AWS Prescriptive Guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/set-up-dns-resolution-for-hybrid-networks-in-a-multi-account-aws-environment.html) provides insight on the different multi-account and hybrid DNS management patterns. 
-- - - [Route 53 Profiles](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/profiles.html) can be used to share [Private Hosted Zones](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/hosted-zones-private.html) and [DNS Resolver Rules](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-forwarding-outbound-queries.html) with the spoke VPCs, for more information on how this can be used, please refer to [Using Amazon Route 53 Profiles for scalable multi-account AWS environments](https://aws.amazon.com/blogs/networking-and-content-delivery/using-amazon-route-53-profiles-for-scalable-multi-account-aws-environments/).
-- - To automate the spoke Private Hosted Zone association with the Hub VPC, refer to Deploy consistent DNS with AWS Service Catalog and AWS Control Tower customizations for code samples.
+    - These AWS DNS [Whitepaper](https://docs.aws.amazon.com/whitepapers/latest/hybrid-cloud-dns-options-for-vpc/scaling-dns-management-across-multiple-accounts-and-vpcs.html) and [AWS Prescriptive Guidance](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/set-up-dns-resolution-for-hybrid-networks-in-a-multi-account-aws-environment.html) provides insight on the different multi-account and hybrid DNS management patterns. 
+        - [Route 53 Profiles](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/profiles.html) can be used to share [Private Hosted Zones](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/hosted-zones-private.html) and [DNS Resolver Rules](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resolver-forwarding-outbound-queries.html) with the spoke VPCs, for more information on how this can be used, please refer to [Using Amazon Route 53 Profiles for scalable multi-account AWS environments](https://aws.amazon.com/blogs/networking-and-content-delivery/using-amazon-route-53-profiles-for-scalable-multi-account-aws-environments/).
+    - To automate the spoke Private Hosted Zone association with the Hub VPC, refer to Deploy consistent DNS with AWS Service Catalog and AWS Control Tower customizations for code samples.
 - [Centralised VPC interface endpoints](https://aws.amazon.com/blogs/networking-and-content-delivery/centralize-access-using-vpc-interface-endpoints/) can be achieved by deploying VPC interface endpoints in the hub VPC, combining with DNS resolver rule shared with the spoke accounts.
 
 ## Security
