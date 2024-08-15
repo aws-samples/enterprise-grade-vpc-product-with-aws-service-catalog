@@ -121,7 +121,7 @@ Resources:
         RestrictPublicBuckets: true
       Tags:
         - Key: description
-          Value: Log bucket for S3 bucket for Service Catalog product for Managed AD sharing
+          Value: Log bucket for S3 bucket for Service Catalog product for VPC Product sharing
 
   S3BucketLogsPolicy:
     Type: AWS::S3::BucketPolicy

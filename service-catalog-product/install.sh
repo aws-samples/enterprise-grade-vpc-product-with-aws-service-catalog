@@ -38,7 +38,7 @@ bucket_stack_name="VPC-SC-Bucket"
 vpc_flow_log_bucket_stack_name="VPC-Flow-Log-Bucket"
 sc_product_template_filename="VPC-Product.yaml"
 
-# VPC Flow Log bucket name (blank means it'd import the managed ad template export)
+# VPC Flow Log bucket name (blank means it'd create an VPC flow log the sample template in this repo)
 read -p "If you used the provided VPC Flow Log template, press enter here to keep this blank. Otherwise, enter the logging bucket name ID: " vpc_flow_log_bucket_name
 
 # OU ids to share IPAM pools with 

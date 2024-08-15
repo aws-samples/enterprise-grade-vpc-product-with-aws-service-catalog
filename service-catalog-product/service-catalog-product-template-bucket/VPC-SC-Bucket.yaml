@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT-0
 
 AWSTemplateFormatVersion: 2010-09-09
-Description: S3 bucket used by Service Catalog for the Managed AD sharing template
+Description: S3 bucket used by Service Catalog for the VPC product sharing template
 
 Resources:
   S3Bucket:
@@ -24,7 +24,7 @@ Resources:
         LogFilePrefix: service-catalog-product-s3-logs
       Tags:
         - Key: description
-          Value: Used by the Service Catalog product for Managed AD sharing
+          Value: Used by the Service Catalog product for VPC Product sharing
 
   S3BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -72,7 +72,7 @@ Resources:
         RestrictPublicBuckets: true
       Tags:
         - Key: description
-          Value: Log bucket for S3 bucket for Service Catalog product for Managed AD sharing
+          Value: Log bucket for S3 bucket for Service Catalog product for VPC Product sharing
 
   S3BucketLogsPolicy:
     Type: AWS::S3::BucketPolicy
