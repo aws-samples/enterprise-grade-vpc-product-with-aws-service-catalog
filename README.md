@@ -55,13 +55,13 @@ There are four directories in this sample code:
 
 - Have administrator access to an AWS Organizations environment.
 - Authentication via AWS IAM Identity Center, or alternatively federated with fixed IAM role names in each AWS account.
-- Have one or more AWS accounts to deploy the dependancies and consume the Service Catalog product, for example a test account to begin with.
+- Have one or more AWS accounts to deploy the dependencies and consume the Service Catalog product, for example a test account to begin with.
 
 Note: While the solution can be deployed in a single account we recommend deploy across multiple accounts to demonstrate the isolation of roles, responsibilities and end-to-end workflow in an Enterprise environment. If you wish to do so, please see below recommendations:
 
 - A Management Account to setup AWS Organization and create Delegated Administrators for Service Catalog and IPAM.
 - A Network Account to deploy [Network Orchestration for AWS Transit Gateway](https://aws.amazon.com/solutions/implementations/network-orchestration-aws-transit-gateway/), [Amazon VPC IP Address Manager (IPAM)](https://docs.aws.amazon.com/vpc/latest/ipam/what-it-is-ipam.html) and [Subnet Calculator](https://github.com/aws-samples/subnet-calculator-custom-resource).
-- (Optional) A Shared Services Account to deploy to Service Catalog Product for VPC, this is sometimes deployed in the Network Account as weel.
+- (Optional) A Shared Services Account to deploy to Service Catalog Product for VPC, this is sometimes deployed in the Network Account as well.
 - A member account to comsume the Service Catalog Product
 
 **The following installation steps assume you are deploying in an AWS Ogranization environment with the above account structure, with Service Catalog product deployed in the Network account.**
@@ -82,12 +82,12 @@ network_account=012345678901  # REPLACE ME
 aws ram enable-sharing-with-aws-organization
 aws servicecatalog enable-aws-organizations-access
 aws organizations enable-aws-service-access --service-principal ds.amazonaws.com
-aws organizations register-delegated-administrator --account-id $network_account --service-principal servicecatalog.amazonaws.com # "account-id" will be a the shared services account if you decide to deploy the Service Catalog product in a different account
+aws organizations register-delegated-administrator --account-id $network_account --service-principal servicecatalog.amazonaws.com # "account-id" will be the shared services account if you decide to deploy the Service Catalog product in a different account
 aws ec2 enable-ipam-organization-admin-account --delegated-admin-account-id $network_account
 ```
 ### (dependency - skip if already deployed) Network Orchestration for AWS Transit Gateway
 
-[Network Orchestration for AWS Transit Gateway](https://aws.amazon.com/solutions/implementations/network-orchestration-aws-transit-gateway/) solution automates the process of setting up and managing transit network in distributed AWS enviornments. The automation is achieved by tagging the VPCs. The VPC template in this solution utilises Network Orchestration for AWS Transit Gateway for integration with AWS Transit Gateway.
+[Network Orchestration for AWS Transit Gateway](https://aws.amazon.com/solutions/implementations/network-orchestration-aws-transit-gateway/) solution automates the process of setting up and managing transit network in distributed AWS environments. The automation is achieved by tagging the VPCs. The VPC template in this solution utilises Network Orchestration for AWS Transit Gateway for integration with AWS Transit Gateway.
 
 [Network Orchestration for AWS Transit Gateway](https://aws.amazon.com/solutions/implementations/network-orchestration-aws-transit-gateway/) has many features, but in this step, we will only focus on deploying the basic features to quickly test our solution.
 
@@ -109,7 +109,9 @@ Navigate to [Network Orchestration for AWS Transit Gateway Deployment Guide](htt
     - **Stack name** - network-orchestration-spoke
     - **Network (Hub) Account**: The account ID for the network account
 
-Note: In an AWS Organisation environment, the deployment of step 3 and 4 can be automated by CloudFormation StackSets via the management account.
+Note: 
+- In an AWS Organisation environment, the deployment of step 3 and 4 can be automated by CloudFormation StackSets via the management account.
+- This solution integrates with the [default Transit Gateway Route Tables](https://docs.aws.amazon.com/solutions/latest/network-orchestration-aws-transit-gateway/using-and-customizing-route-tables.html#default-route-tables) created by Network Orchestration for AWS Transit Gateway solution, refer to the [Custom route tables](https://docs.aws.amazon.com/solutions/latest/network-orchestration-aws-transit-gateway/using-and-customizing-route-tables.html) section if you want to customize.
 
 ### (dependency - skip if already deployed) Subnet Calculator Custom Resource
 
@@ -163,7 +165,7 @@ You can then log into an AWS account that has access to the shared Service Catal
 To avoid ongoing charges, follow these steps:
 
 - In the test Workload Account(s):
-- - Go to Service Catalog Provisioned products, and terminate the associated provisioned product(s). This deletes the VPC and other associted resources, including the Transit Gateway Attachments
+- - Go to Service Catalog Provisioned products, and terminate the associated provisioned product(s). This deletes the VPC and other associated resources, including the Transit Gateway Attachments
 - - Go to CloudFormation, and delete the "network-orchestration-spoke-service-linked-roles" stack
 - In the Network Account:
 - - Go to Service Catalog, Portfolios, click on “VPC”, go to the “Share” tab, and select the items in the list, and click on Actions -> Unshare.
@@ -173,6 +175,17 @@ To avoid ongoing charges, follow these steps:
 - - Go to CloudFormation, and delete the following stacks: 1) VPC-SC-Bucket, 2) VPC-Flow-Log-Bucket, 3) IPAM 4) network-orchestration-hub 5) network-orchestration-spoke 6) Subnet-Calculator 7) VPC-Service-Catalog
 - In the Management Account:
 - - Go to CloudFormation, and delete the “network-orchestration-organization-role” stack
+
+## Next Steps
+
+To allow network administrators to customise the VPC template in this post based on your organization requirements, this section will provide more information about other networking solutions that can be integrated with the sample VPC template in this blog based on the organization requirements:
+
+- Centralised egress and inspections with either AWS Network Firewall or Gateway Load Balancer can be achieved by adding static routes in the Transit Gateway and Subnet route tables.
+- Hybrid and multi-account DNS: 
+- - These AWS DNS Whitepaper and AWS Prescriptive Guidance provides insight on the different multi-account and hybrid DNS management patterns. 
+- - - Route 53 Profiles can be used to share Private Hosted Zonesand DNS Resolver Rules with the spoke VPCs, for more information on how this can be used, please refer to Using Amazon Route 53 Profiles for scalable multi-account AWS environments.
+- - To automate the spoke Private Hosted Zone association with the Hub VPC, refer to Deploy consistent DNS with AWS Service Catalog and AWS Control Tower customizations for code samples.
+- Centralised VPC interface endpoints can be achieved by deploying VPC interface endpoints in the hub VPC, combining with DNS resolver rule shared with the spoke accounts.
 
 ## Security
 
