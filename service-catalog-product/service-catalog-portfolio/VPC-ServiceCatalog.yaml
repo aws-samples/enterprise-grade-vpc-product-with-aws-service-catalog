@@ -1,0 +1,185 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC Service Catalog product
+
+Parameters:
+  ProviderName:
+    Type: String
+    Description: Organization name
+
+  VPCTemplateURL:
+    Type: String
+    Description: HTTPS S3 URL prefix to VPC template
+
+  ProductVersion:
+    Type: String
+    Description: Product version
+    Default: v1
+
+  PrincipalType:
+    Type: String
+    Description: Type of principal
+    AllowedValues:
+         - IAM_Identity_Center_Permission_Set
+         - IAM_role_name
+    Default: IAM_Identity_Center_Permission_Set
+
+  IAMIdentityCenterRegion:
+    Type: String
+    Description: (Only required if PrincipalType is IAM_Identity_Center_Permission_Set) IAM Identity Center home region
+    Default: "us-east-1"
+
+  PrincipalName01:
+    Type: String
+    Description: IAM role name or permission set that can access the Service Catalog product
+    Default: AWSAdministratorAccess
+
+  PrincipalName02:
+    Type: String
+    Description: (Optional) IAM role name or permission set that can access the Service Catalog product
+    Default: ""
+
+Conditions:
+  PrincipleTypeIAMIdentityCenter: !Equals [ !Ref PrincipalType, "IAM_Identity_Center_Permission_Set" ]
+  PrincipalName01: !Not [ !Equals [ !Ref PrincipalName01, '' ] ]
+  PrincipalName02: !Not [ !Equals [ !Ref PrincipalName02, '' ] ]
+
+Resources:
+  VPCPortfolio:
+    Type: "AWS::ServiceCatalog::Portfolio"
+    Properties:
+      AcceptLanguage: "en"
+      Description: "VPC Portfolio"
+      DisplayName: "VPC"
+      ProviderName: !Ref ProviderName
+
+
+  VPCProduct:
+    Type: AWS::ServiceCatalog::CloudFormationProduct
+    Properties:
+      Description: VPC Service Catalog Product
+      Name: VPC
+      Owner: !Ref ProviderName
+      ProductType: CLOUD_FORMATION_TEMPLATE
+      ProvisioningArtifactParameters:
+        - Info:
+            LoadTemplateFromURL: !Ref VPCTemplateURL
+          Name: !Ref ProductVersion 
+
+  LaunchTemplateConstraint:
+    Type: AWS::ServiceCatalog::LaunchTemplateConstraint
+    Properties: 
+      PortfolioId: !Ref VPCPortfolio
+      ProductId: !Ref VPCProduct
+      Rules: |
+        {
+          "ProdRule": {
+            "RuleCondition" : {"Fn::Equals":[{"Ref":"Environment"}, "prod"]},
+            "Assertions": [
+              {
+                "Assert" : {"Fn::Contains": [[
+                            "1 public, 1 private, with Transit Gateway, dedicated NAT gateways", 
+                            "1 public, 1 private, with Transit Gateway",
+                            "1 public, 2 private, with Transit Gateway",
+                            "No public, 1 private, with Transit Gateway",
+                            "No public, 2 private, with Transit Gateway",
+                            "No public, 3 private, with Transit Gateway"
+                            ], 
+                            {"Ref": "VPCPattern"}]},
+                "AssertDescription": "Prod VPCs must connect to Transit Gateway"
+              },
+              {
+                "Assert" : {"Fn::Contains": [[
+                            "Access-to-Shared-Services-and-On-Premises-Only", 
+                            "Access-to-Shared-Services-Only",
+                            "Provide-Shared-Services-for-Infrastructure.Accessible-by-all-VPCs"
+                            ], 
+                            {"Ref": "TransitGatewayConnectivity"}]},
+                "AssertDescription": "Prod VPCs must connect to Transit Gateway"
+              }
+            ]
+          },
+          "NonprodRule": {
+            "RuleCondition" : {"Fn::Equals":[{"Ref":"Environment"}, "nonprod"]},
+            "Assertions": [
+              {
+                "Assert" : {"Fn::Contains": [[
+                            "No public, 1 private, with Transit Gateway",
+                            "No public, 2 private, with Transit Gateway",
+                            "No public, 3 private, with Transit Gateway",
+                            "Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private",
+                            "Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private"
+                            ], 
+                            {"Ref": "VPCPattern"}]},
+                "AssertDescription": "Nonprod VPCs cannot have public subnets"
+              },
+              {
+                "Assert" : {"Fn::Contains": [[
+                            "24"
+                            ], 
+                            {"Ref": "CIDRPrefix"}]},
+                "AssertDescription": "Nonprod VPCs cannot be larget than /24"
+              }
+            ]
+          },
+          "TransitGatewayRule": {
+            "RuleCondition" : {"Fn::Contains": [[
+                            "Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private",
+                            "Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private"
+                            ], 
+                            {"Ref": "VPCPattern"}]},
+            "Assertions": [
+              {
+                "Assert" : {"Fn::Equals":[{"Ref":"TransitGatewayConnectivity"}, "None"]},
+                "AssertDescription": "Isolated VPCs do not connect to Transit Gateway"
+              }
+            ]
+          }
+        }
+
+  PortfolioAssociation:
+    Type: AWS::ServiceCatalog::PortfolioProductAssociation
+    Properties:
+      PortfolioId: !Ref 'VPCPortfolio'
+      ProductId: !Ref 'VPCProduct'
+
+  PortfolioPrincipalAssociation01:
+    Condition: PrincipalName01
+    Type: AWS::ServiceCatalog::PortfolioPrincipalAssociation
+    Properties:
+      PortfolioId: !Ref VPCPortfolio
+      PrincipalType: IAM_PATTERN
+      PrincipalARN: !If 
+        - PrincipleTypeIAMIdentityCenter
+        # then, https://docs.aws.amazon.com/singlesignon/latest/userguide/referencingpermissionsets.html
+        - !Sub arn:${AWS::Partition}:iam:::role/aws-reserved/sso.amazonaws.com/${IAMIdentityCenterRegion}/AWSReservedSSO_${PrincipalName01}_*
+        # else:
+        - !Sub arn:${AWS::Partition}:iam:::role/${PrincipalName01}
+
+  PortfolioPrincipalAssociation02:
+    Condition: PrincipalName02
+    Type: AWS::ServiceCatalog::PortfolioPrincipalAssociation
+    Properties:
+      PortfolioId: !Ref VPCPortfolio
+      PrincipalType: IAM_PATTERN
+      PrincipalARN: !If 
+        - PrincipleTypeIAMIdentityCenter
+        # then, https://docs.aws.amazon.com/singlesignon/latest/userguide/referencingpermissionsets.html
+        - !Sub arn:${AWS::Partition}:iam:::role/aws-reserved/sso.amazonaws.com/${IAMIdentityCenterRegion}/AWSReservedSSO_${PrincipalName02}_*
+        # else:
+        - !Sub arn:${AWS::Partition}:iam:::role/${PrincipalName02}
+
+Outputs:
+  PortfolioID:
+    Description: Portfolio ID
+    Value: !Ref VPCPortfolio
+    Export:
+      Name: !Sub SC-VPC-PortfolioID
+
+  ProductID:
+    Description: Product ID
+    Value: !Ref VPCProduct
+    Export:
+      Name: !Sub SC-VPC-ProductID      

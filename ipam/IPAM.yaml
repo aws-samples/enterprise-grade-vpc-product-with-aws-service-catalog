@@ -1,0 +1,141 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# This configures the IPAM for the AWS Organization.
+# Customize this template based on the pools and CIDRs you need.
+# Pools are in hierarchies, some examples are:
+#   Main pool -> Regions -> Environment(nonprod/prod)
+# or
+#   Main pool -> Environment(nonprod/prod) -> Regions
+# or
+#   Main pool -> Business unit -> etc.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: IPAM pools for the AWS Organization
+
+Parameters:
+  NonProdOuArns:
+    Description: Comma separated ARN of non-prod OUs
+    Type: CommaDelimitedList
+
+  ProdOuArns:
+    Description: Comma separated ARN of prod OUs
+    Type: CommaDelimitedList
+
+Resources:
+  IPAM:
+    Type: AWS::EC2::IPAM
+    Properties: 
+      Description: AWS Organization IPAM
+      OperatingRegions:
+        - RegionName: !Ref "AWS::Region"
+        #- RegionName: ...add-more-if-required...
+
+
+##############
+# IPAM Pools #
+##############
+
+  MainPool:
+    Type: AWS::EC2::IPAMPool
+    Properties: 
+      Description: Main Pool
+      ProvisionedCidrs:
+        - Cidr: 10.10.0.0/16
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt IPAM.PrivateDefaultScopeId
+      Tags:
+        - Key: Name
+          Value: Main Pool
+
+
+  # Sample for first region top level pool
+  MainRegionPool:
+    Type: AWS::EC2::IPAMPool
+    Properties: 
+      Locale: !Ref AWS::Region
+      Description: !Sub ${AWS::Region} Pool
+      ProvisionedCidrs:
+        - Cidr: 10.10.0.0/17
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt IPAM.PrivateDefaultScopeId
+      SourceIpamPoolId: !Ref MainPool
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::Region} Pool
+
+
+  # Sample for first region non-prod pool
+  MainRegionNonProdPool:
+    Type: AWS::EC2::IPAMPool
+    Properties: 
+      Locale: !Ref AWS::Region
+      Description: !Sub ${AWS::Region} Non-Prod Pool
+      ProvisionedCidrs:
+        - Cidr: 10.10.0.0/18
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt IPAM.PrivateDefaultScopeId
+      SourceIpamPoolId: !Ref MainRegionPool
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::Region} Non-Prod Pool
+
+
+  # Sample for first region prod pool
+  MainRegionProdPool:
+    Type: AWS::EC2::IPAMPool
+    Properties: 
+      Locale: !Ref AWS::Region
+      Description: !Sub ${AWS::Region} Prod Pool
+      ProvisionedCidrs:
+        - Cidr: 10.10.64.0/18
+      AddressFamily: ipv4
+      IpamScopeId: !GetAtt IPAM.PrivateDefaultScopeId
+      SourceIpamPoolId: !Ref MainRegionPool
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::Region} Prod Pool
+
+
+##############
+# RAM shares #
+##############
+
+  # Share non-prod pool to non-prod OUs:
+  ShareNonProdPool:
+    Type: AWS::RAM::ResourceShare
+    Properties: 
+      AllowExternalPrincipals: False
+      Name: IPAM-NonProd-Pool-Share
+      PermissionArns: 
+        - arn:aws:ram::aws:permission/AWSRAMDefaultPermissionsIpamPool
+      Principals: !Ref NonProdOuArns
+      ResourceArns: 
+        - !GetAtt MainRegionNonProdPool.Arn
+
+
+  # Share prod pool to prod OUs:
+  ShareProdPool:
+    Type: AWS::RAM::ResourceShare
+    Properties: 
+      AllowExternalPrincipals: False
+      Name: IPAM-Prod-Pool-Share
+      PermissionArns: 
+        - arn:aws:ram::aws:permission/AWSRAMDefaultPermissionsIpamPool
+      Principals: !Ref ProdOuArns
+      ResourceArns: 
+        - !GetAtt MainRegionProdPool.Arn
+
+
+###########
+# Outputs #
+###########
+
+Outputs:
+  MainRegionProdPoolID:
+    Description: Main region Prod IPAM pool ID
+    Value: !Ref MainRegionProdPool
+
+  MainRegionNonProdPoolID:
+    Description: Main region NonProd IPAM pool ID
+    Value: !Ref MainRegionNonProdPool

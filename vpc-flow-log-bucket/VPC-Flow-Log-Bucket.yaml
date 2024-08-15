@@ -1,0 +1,158 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: VPC Flow log bucket for all accounts
+
+Parameters:
+  LogRetentionDays:
+    Description: Number of days to retain the logs
+    Type: Number
+  LogInfrequentAccessDays:
+    Description: Number of days before moving to S3 IA storage
+    Type: Number
+  BucketPrefix:
+    Description: Bucket prefix before the region name
+    Type: String
+
+
+Resources:
+  KMSKey:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::KMS::Key
+    Properties:
+      Tags:
+        - Key: description
+          Value: Used for the central VPC flow log bucket
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          # Allow IAM to set access:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          # Allow the VPC Flow Logs to use the key
+          - Effect: Allow
+            Principal:
+              Service: [ "delivery.logs.amazonaws.com" ]
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+
+  KeyAlias:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/VPC-Flow-Log-Bucket
+      TargetKeyId: !Ref KMSKey
+
+
+  VPCFlowLogBucket:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${BucketPrefix}-${AWS::AccountId}-${AWS::Region}
+      Tags:
+        - Key: description
+          Value: Central VPC flow log bucket for all accounts
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${KeyAlias}'
+      LoggingConfiguration:
+        DestinationBucketName: !Ref S3BucketLogs
+        LogFilePrefix: service-catalog-product-s3-logs
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: !Ref LogRetentionDays
+            Status: Enabled            
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: !Ref LogInfrequentAccessDays
+
+
+  VPCFlowLogBucketPolicy:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VPCFlowLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # AWSLogDeliveryWrite
+          - Effect: Allow
+            Principal: {"Service": "delivery.logs.amazonaws.com"}
+            Action: s3:PutObject
+            Resource: !Sub arn:aws:s3:::${VPCFlowLogBucket}/vpc-flow-logs/AWSLogs/*
+            Condition: {"StringEquals": {"s3:x-amz-acl": "bucket-owner-full-control"}}
+          # AWSLogDeliveryAclCheck
+          - Effect: Allow
+            Principal: {"Service": "delivery.logs.amazonaws.com"}
+            Action: s3:GetBucketAcl
+            Resource: !Sub arn:aws:s3:::${VPCFlowLogBucket}
+            
+  S3BucketLogs:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: description
+          Value: Log bucket for S3 bucket for Service Catalog product for Managed AD sharing
+
+  S3BucketLogsPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketLogs
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Resource: !Sub "${S3BucketLogs.Arn}/*"
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !GetAtt S3BucketLogs.Arn
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: SecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt S3BucketLogs.Arn
+              - !Sub "${S3BucketLogs.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+Outputs:
+  Bucket:
+    Description: VPC flow log bucket
+    Value: !Ref VPCFlowLogBucket

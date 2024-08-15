@@ -1,0 +1,1528 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+---
+# Creates a VPC. Supports various patterns through Conditions.
+# This template is hardcoded to use 3 AZs.
+# Depends on SNTO being active, as well as the Subnet Calculator solution and AWS VPC IPAM.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Standard VPC network
+
+##############
+# Parameters #
+##############
+
+Parameters:
+  Environment:
+    Description: "Environment"
+    Type: String
+    AllowedValues:
+      - nonprod
+      - prod
+
+  VPCName:
+    Description: Text to prefix in the VPC resource names
+    Type: String
+
+  VPCPattern:
+    Description: VPC pattern to create
+    Type: String
+    Default: No public, 1 private, with Transit Gateway
+    AllowedValues:
+      - 1 public, 1 private, with Transit Gateway, dedicated NAT gateways
+      - 1 public, 1 private, with Transit Gateway
+      - 1 public, 2 private, with Transit Gateway
+      - No public, 1 private, with Transit Gateway
+      - No public, 2 private, with Transit Gateway
+      - No public, 3 private, with Transit Gateway
+      - Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private
+      - Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private
+
+  CIDRPrefix:
+    Description: "VPC CIDR prefix. Approximate IPs: /24: 150 IPs -- /23: 350 IPs -- /22: 750 IPs -- /21: 1500 IPs -- /20: 3000 IPs"
+    Type: Number
+    Default: 24
+    AllowedValues:
+      - 24
+      - 23
+      - 22
+      - 21
+      - 20
+
+  TransitGatewayConnectivity:
+    Description: Connectivity requirements, configures the Transit Gateway route tables.
+    Type: String
+    AllowedValues:
+      # For the Mappings to work, we can only have alphanumeric chars, -, and .
+      # No spaces.
+      - "None"
+      - "Access-to-Shared-Services-and-On-Premises-Only"
+      - "Access-to-Shared-Services-Only"
+      - "Provide-Shared-Services-for-Infrastructure.Accessible-by-all-VPCs"
+      # Add more as needed.
+    Default: "Access-to-Shared-Services-and-On-Premises-Only"
+
+  VPCNetwork:
+    Description: Network (WITHOUT the /prefix) to assign to the created VPC, eg. 10.123.0.0 . Set to Automatic to get a unique network range.
+    Type: String
+    Default: Automatic
+    AllowedPattern: ^((\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})|Automatic)$
+
+  PrivateDomainName:
+      Description: Private hosted zone DNS name for this VPC
+      Type: String
+      Default: awslocal
+
+  # Advanced options:
+  Private1SubnetMask:
+      Description: >
+        (Advanced) Override automatic subnet prefix selection. 
+        If this is set, all subnet masks below need to be specified. 
+        Set to 0 if subnet does not exist for the pattern.
+      Type: String
+      Default: Automatic
+      AllowedValues: [ Automatic, 0, 23, 24, 25, 26, 27, 28 ]
+  Private2SubnetMask:
+      Description: (Advanced) Override automatic subnet mask selection. 
+      Type: String
+      Default: Automatic
+      AllowedValues: [ Automatic, 0, 23, 24, 25, 26, 27, 28 ]
+  Private3SubnetMask:
+      Description: (Advanced) Override automatic subnet mask selection. 
+      Type: String
+      Default: Automatic
+      AllowedValues: [ Automatic, 0, 23, 24, 25, 26, 27, 28 ]
+  PublicSubnetMask:
+      Description: (Advanced) Override automatic subnet mask selection.
+      Type: String
+      Default: Automatic
+      AllowedValues: [ Automatic, 0, 23, 24, 25, 26, 27, 28 ]
+  # For informational purposes only, for users calculating the available space themselves:
+  TGWSubnetMask: # Not used
+      Description: (Advanced) Override automatic subnet mask selection.
+      Type: String
+      Default: "28"
+      AllowedValues: [ "28" ]
+
+  Private1SubnetLabel:
+      Description: Name for the first private subnet
+      Type: String
+      Default: "Private Subnet 1"
+  Private2SubnetLabel:
+      Description: (if applicable) Name for the second private subnet
+      Type: String
+      Default: "Private Subnet 2"
+  Private3SubnetLabel:
+      Description: (if applicable) Name for the third private subnet
+      Type: String
+      Default: "Private Subnet 3"
+  PublicSubnetLabel:
+      Description: Name for the public subet
+      Type: String
+      Default: "Public Subnet"
+
+
+Rules:
+  NoTransitGatewayPattern:
+    RuleCondition: !Or
+      - !Equals [ !Ref VPCPattern, "Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private" ]
+      - !Equals [ !Ref VPCPattern, "Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private" ]
+    Assertions:
+      - Assert: !Equals [ !Ref TransitGatewayConnectivity, "None" ] 
+        AssertDescription: 'VPC pattern has no Transit Gateway'
+  HasTransitGatewayPattern:
+    RuleCondition: !Not
+      - !Or
+        - !Equals [ !Ref VPCPattern, "Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private" ]
+        - !Equals [ !Ref VPCPattern, "Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private" ]
+    Assertions:
+      - Assert: !Not [ !Equals [ !Ref TransitGatewayConnectivity, "None" ] ]
+        AssertDescription: 'Transit Gateway pattern required for given pattern.'
+
+
+Mappings:
+
+  #############
+  # Variables #
+  #############
+  Variables:
+    TransitGatewayID:
+      Value: tgw-xyz
+    VPCFlowLogBucket:
+      Value: xyz
+    VPCFlowLogPrefix:
+      Value: vpc-flow-logs
+    NetworkAccountID:
+      Value: "01234"
+    IPAMPools:
+      # !Ref Environment to VPC IPAM pool ID mapping:
+      prod: ipam-pool-abc
+      nonprod: ipam-pool-xyz
+
+
+  ################################
+  # Transit Gateway route tables #
+  ###############################
+
+  # These are based on Conditions that looks at !Ref TransitGatewayConnectivity
+  TransitGatewayRouteTablePatterns:
+    "Access-to-Shared-Services-and-On-Premises-Only":
+      AssociateWith: Isolated
+      PropagateTo: Flat,Infrastructure,On-premises
+
+    "Access-to-Shared-Services-Only":
+      AssociateWith: Isolated
+      PropagateTo: Flat,Infrastructure
+
+    "Provide-Shared-Services-for-Infrastructure.Accessible-by-all-VPCs":
+      AssociateWith: Infrastructure
+      PropagateTo: Isolated,Flat,Infrastructure,On-premises
+
+    "None":
+      AssociateWith: ""
+      PropagateTo: ""
+
+  # Default VPC Prefix to subnet prefix mapping
+  # Subnet prefix needs to take into account 3 x /28 for TGW
+  "24":
+    OneSubnet:
+      Private1: 26    
+    TwoSubnets:
+      Private1: 27
+      PublicOrPrivate2: 27
+    ThreeSubnets:
+      Private1: 27
+      Private2: 28
+      PublicOrPrivate3: 28
+  "23":
+    OneSubnet:
+      Private1: 25  
+    TwoSubnets:
+      Private1: 26
+      PublicOrPrivate2: 26
+    ThreeSubnets:
+      Private1: 26
+      Private2: 27
+      PublicOrPrivate3: 27
+  "22":
+    OneSubnet:
+      Private1: 24
+    TwoSubnets:
+      Private1: 25
+      PublicOrPrivate2: 25
+    ThreeSubnets:
+      Private1: 25
+      Private2: 25
+      PublicOrPrivate3: 26
+  "21":
+    OneSubnet:
+      Private1: 23
+    TwoSubnets:
+      Private1: 24
+      PublicOrPrivate2: 24
+    ThreeSubnets:
+      Private1: 24
+      Private2: 24
+      PublicOrPrivate3: 25
+  "20":
+    OneSubnet:
+      Private1: 22
+    TwoSubnets:
+      Private1: 23
+      PublicOrPrivate2: 23
+    ThreeSubnets:
+      Private1: 23
+      Private2: 23
+      PublicOrPrivate3: 24
+
+
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Required configuiraion
+        Parameters:
+          - VPCName
+          - Environment
+
+      - Label:
+          default: Networking configuration
+        Parameters:
+          - VPCPattern
+          - TransitGatewayConnectivity
+          - VPCNetwork
+          - CIDRPrefix
+
+      - Label:
+          default: Subnet naming
+        Parameters:
+          - Private1SubnetLabel
+          - Private2SubnetLabel
+          - Private3SubnetLabel
+          - PublicSubnetLabel
+
+      - Label:
+          default: Advanced configuration
+        Parameters:
+          - Private1SubnetMask
+          - Private2SubnetMask
+          - Private3SubnetMask
+          - PublicSubnetMask
+          - TGWSubnetMask
+
+    ParameterLabels:
+      VPCNetwork:
+        default: VPC IP network
+      CIDRPrefix:
+        default: VPC prefix/size
+      VPCName:
+        default: Name of the VPC. "VPC" will be appended to this name.
+      VPCPattern:
+        default: VPC pattern and subnets to create
+      PrivateDomainName:
+        default: Private DNS name
+      TransitGatewayConnectivity:
+        default: Transit Gateway connectivity requirements
+
+
+
+##############
+# Conditions #
+##############
+
+Conditions:
+  AutomaticCidr: !Equals [ !Ref VPCNetwork, 'Automatic' ]  
+
+  ConnectToTransitGateway: !Not
+    - !Or
+      - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private' ]
+      - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private' ]  
+
+  UseDedicatedNATGateways: !Or
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway, dedicated NAT gateways' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private' ]
+
+  HaveNATGatewaysPerAZ: !Or
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private' ]
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway, dedicated NAT gateways' ]
+
+  # These count the number of subnet sets (not counting TGW subnets)
+  OneSubnet: !Equals [ !Ref VPCPattern, 'No public, 1 private, with Transit Gateway' ]
+  TwoSubnets: !Or
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway, dedicated NAT gateways' ]
+    - !Equals [ !Ref VPCPattern, 'No public, 2 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private' ]
+  # ThreeSubnets: Any other patter not matching the above.
+
+  CreatePrivate2Subnets: !Or
+    - !Equals [ !Ref VPCPattern, 'No public, 2 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, 'No public, 3 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, '1 public, 2 private, with Transit Gateway' ]
+
+  CreatePrivate3Subnets: !Equals [ !Ref VPCPattern, 'No public, 3 private, with Transit Gateway' ]
+  
+  CreatePublicSubnets: !Or
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, '1 public, 1 private, with Transit Gateway, dedicated NAT gateways' ]
+    - !Equals [ !Ref VPCPattern, '1 public, 2 private, with Transit Gateway' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, multi-AZ NAT, 1 public, 1 private' ]
+    - !Equals [ !Ref VPCPattern, 'Isolated - No Transit Gateway, single-AZ NAT, 1 public, 1 private' ]
+
+  # Check if the subnet masks were overridden
+  ManualSubnetMaskPrivate1: !Not [ !Equals [ !Ref Private1SubnetMask, 'Automatic' ] ]
+  ManualSubnetMaskPrivate2: !Not [ !Equals [ !Ref Private2SubnetMask, 'Automatic' ] ]
+  ManualSubnetMaskPrivate3: !Not [ !Equals [ !Ref Private3SubnetMask, 'Automatic' ] ]
+  ManualSubnetMaskPublic: !Not [ !Equals [ !Ref PublicSubnetMask, 'Automatic' ] ]
+
+  # Negative conditions:
+  UseSharedNATGateways: !Not [ !Condition UseDedicatedNATGateways ]
+  UserDefinedCidr: !Not [ !Condition AutomaticCidr ]
+
+  # Compound Conditions:
+  UseDedicatedNATGateways&HaveNATGatewaysPerAZ: !And
+    - !Condition 'UseDedicatedNATGateways'
+    - !Condition 'HaveNATGatewaysPerAZ'
+
+  CreatePrivate2Subnets&UseDedicatedNATGateways: !And 
+    - !Condition 'CreatePrivate2Subnets'
+    - !Condition 'UseDedicatedNATGateways'
+
+  CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ: !And 
+    - !Condition 'CreatePrivate2Subnets'
+    - !Condition 'UseDedicatedNATGateways'
+    - !Condition 'HaveNATGatewaysPerAZ'
+
+  CreatePrivate2Subnets&UseSharedNATGateways: !And 
+    - !Condition 'CreatePrivate2Subnets'
+    - !Condition 'UseSharedNATGateways' 
+
+  CreatePrivate3Subnets&ConnectToTransitGateway: !And
+    - !Condition 'CreatePrivate3Subnets'
+    - !Condition 'ConnectToTransitGateway'
+
+
+Resources:
+
+#######
+# VPC #
+#######
+
+  # This Custom resource reads the list of Subnets Labels+prefixes given, and returns a dictionary
+  # with a key of the Label given, and the value of an array of 3 CIDRs (one for each AZ).
+  # If the Prefix is set to 0, it's as though the prefix was not listed.
+  # The custom resource lambda runs in the network account, exposed via SNS.
+  SubnetCalculator:
+    Type: Custom::SubnetCalculator
+    Properties:
+      ServiceToken: !Sub 
+        - arn:aws:sns:${AWS::Region}:${NetworkAccountID}:SubnetCalculatorV1
+        - NetworkAccountID: !FindInMap [ Variables, NetworkAccountID, Value ]
+      VPCNetwork: !GetAtt VPC.CidrBlock
+      AZs: 3
+      Subnets:
+        # Always calculate the TGW subnet, so that it is easy to migrate from
+        # a non-TGW pattern to a TGW one. It does not need to be used for non-TGW patterns.
+        - Label: TGW
+          Prefix: 28
+
+        - Label: Private1
+          Prefix: !If
+            - ManualSubnetMaskPrivate1
+            # Then:
+            - !Ref Private1SubnetMask
+            # Else, automatic selection based on Mapping:
+            - !If
+              - OneSubnet
+              - !FindInMap [ !Ref CIDRPrefix, "OneSubnet", Private1 ]
+              - !If
+                - TwoSubnets
+                - !FindInMap [ !Ref CIDRPrefix, "TwoSubnets",  Private1 ]
+                # Else:
+                - !FindInMap [ !Ref CIDRPrefix, "ThreeSubnets",  Private1 ]
+
+        - !If
+          - CreatePrivate2Subnets
+          - Label: Private2
+            Prefix: !If
+              - ManualSubnetMaskPrivate2
+              # Then:
+              - !Ref Private2SubnetMask
+              # Else, automatic selection based on Mapping:
+              - !If
+                - TwoSubnets
+                - !FindInMap [ !Ref CIDRPrefix, "TwoSubnets", PublicOrPrivate2 ]
+                # Else
+                - !FindInMap [ !Ref CIDRPrefix, "ThreeSubnets", Private2 ]
+          # If not CreatePrivate2Subnets, skip this section:
+          - !Ref AWS::NoValue
+
+        - !If
+          - CreatePrivate3Subnets
+          - Label: Private3
+            Prefix: !If
+              - ManualSubnetMaskPrivate3
+              # Then:
+              - !Ref Private3SubnetMask
+              # Else, automatic selection based on Mapping:
+              - !FindInMap [ !Ref CIDRPrefix, "ThreeSubnets",  PublicOrPrivate3 ]
+          # If not CreatePrivate3Subnets, skip this section:
+          - !Ref AWS::NoValue
+
+        - !If
+          - CreatePublicSubnets
+          - Label: Public
+            Prefix: !If
+              - ManualSubnetMaskPublic
+              # Then:
+              - !Ref PublicSubnetMask
+              # Else, automatic selection based on Mapping:
+              - !If
+                - TwoSubnets
+                - !FindInMap [ !Ref CIDRPrefix, "TwoSubnets", PublicOrPrivate2 ]
+                # Else
+                - !FindInMap [ !Ref CIDRPrefix, "ThreeSubnets", PublicOrPrivate3 ]
+          # If not CreatePublicSubnets, skip this section:
+          - !Ref AWS::NoValue
+
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !If [ UserDefinedCidr, !Join ["/",[!Ref VPCNetwork, !Ref CIDRPrefix]], !Ref AWS::NoValue ]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Ipv4IpamPoolId: !If
+        - AutomaticCidr
+        # then
+        - !FindInMap [ Variables, IPAMPools, !Ref Environment ]
+        # else
+        - !Ref AWS::NoValue
+      Ipv4NetmaskLength: !If [ AutomaticCidr, !Ref CIDRPrefix, !Ref AWS::NoValue ]
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName}-VPC
+          # STNO tags, if Transit Gateway is being used:
+          - !If 
+            - ConnectToTransitGateway
+            - Key: Associate-with
+              Value: !FindInMap [ TransitGatewayRouteTablePatterns, !Ref TransitGatewayConnectivity, AssociateWith]
+            - !Ref AWS::NoValue
+          - !If 
+            - ConnectToTransitGateway
+            - Key: Propagate-to
+              Value: !FindInMap [ TransitGatewayRouteTablePatterns, !Ref TransitGatewayConnectivity, PropagateTo]
+            - !Ref AWS::NoValue
+          
+
+  #########################
+  # Private Subnets (main)#
+  #########################
+            
+  PrivateSubnet1A:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 0, !GetAtt SubnetCalculator.Private1 ]
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private1SubnetLabel}A
+
+
+  PrivateSubnet1B:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 1, !GetAtt SubnetCalculator.Private1 ]
+      AvailabilityZone: !Select [ 1, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private1SubnetLabel}B
+
+
+  PrivateSubnet1C:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 2, !GetAtt SubnetCalculator.Private1 ]
+      AvailabilityZone: !Select [ 2, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private1SubnetLabel}C     
+  
+
+  # Route tables:
+  PrivateRouteTable1A:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: 
+              !If
+                - UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+                - !Sub ${VPCName} ${Private1SubnetLabel}A route table
+                - !Sub ${VPCName} ${Private1SubnetLabel} route table
+  PrivateRouteTable1B:
+    Type: AWS::EC2::RouteTable
+    # We generally can use the same route table (A) on all subnets, unless there is a NAT gateway per subnet:
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${Private1SubnetLabel}B route table
+  PrivateRouteTable1C:
+    Type: AWS::EC2::RouteTable
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${Private1SubnetLabel}C route table
+
+  # Route associations:
+  PrivateRouteAssociation1A:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1A
+      SubnetId: !Ref PrivateSubnet1A
+  PrivateRouteAssociation1B:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      # We generally can use the same route table (A) on all subnets, unless there is a NAT gateway per subnet:
+      RouteTableId: !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1B, !Ref PrivateRouteTable1A ]
+      SubnetId: !Ref PrivateSubnet1B
+  PrivateRouteAssociation1C:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1C, !Ref PrivateRouteTable1A ]
+      SubnetId: !Ref PrivateSubnet1C
+      
+
+  ###############################
+  # Private Subnets (second set)#
+  ###############################
+
+  PrivateSubnet2A:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate2Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 0, !GetAtt SubnetCalculator.Private2 ]
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private2SubnetLabel}A
+
+  PrivateSubnet2B:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate2Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 1, !GetAtt SubnetCalculator.Private2 ]
+      AvailabilityZone: !Select [ 1, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private2SubnetLabel}B
+
+  PrivateSubnet2C:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate2Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 2, !GetAtt SubnetCalculator.Private2 ]
+      AvailabilityZone: !Select [ 2, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private2SubnetLabel}C 
+
+  # Route tables:
+  PrivateRouteTable2A:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivate2Subnets
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: 
+              !If
+                - UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+                - !Sub ${VPCName} ${Private2SubnetLabel}A route table
+                - !Sub ${VPCName} ${Private2SubnetLabel} route table
+  PrivateRouteTable2B:
+    Type: AWS::EC2::RouteTable
+    # We generally can use the same route table (A) on all subnets, unless there is a NAT gateway per subnet:
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${Private2SubnetLabel}B route table
+  PrivateRouteTable2C:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${Private2SubnetLabel}C route table            
+
+  # Route assocations:
+  PrivateRouteAssociation2A:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate2Subnets
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2A
+      SubnetId: !Ref PrivateSubnet2A
+  PrivateRouteAssociation2B:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate2Subnets
+    Properties:
+      # We generally can use the same route table (A) on all subnets, unless there is a NAT gateway per subnet:
+      RouteTableId: !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2B, !Ref PrivateRouteTable2A ]
+      SubnetId: !Ref PrivateSubnet2B
+  PrivateRouteAssociation2C:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate2Subnets
+    Properties:
+      RouteTableId: !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2C, !Ref PrivateRouteTable2A ]
+      SubnetId: !Ref PrivateSubnet2C
+
+
+  ###############################
+  # Private Subnets (third set) #
+  ###############################
+
+  PrivateSubnet3A:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate3Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 0, !GetAtt SubnetCalculator.Private3 ]
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private3SubnetLabel}A
+
+  PrivateSubnet3B:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate3Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 1, !GetAtt SubnetCalculator.Private3 ]
+      AvailabilityZone: !Select [ 1, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private3SubnetLabel}B
+
+  PrivateSubnet3C:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePrivate3Subnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 2, !GetAtt SubnetCalculator.Private3 ]
+      AvailabilityZone: !Select [ 2, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${Private3SubnetLabel}C 
+
+  # Route tables:
+  PrivateRouteTable3A:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePrivate3Subnets
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${Private3SubnetLabel} route table
+       
+  # Route assocations:
+  PrivateRouteAssociation3A:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate3Subnets
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3A
+      SubnetId: !Ref PrivateSubnet3A
+  PrivateRouteAssociation3B:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate3Subnets
+    Properties:
+      # We generally can use the same route table (A) on all subnets, unless there is a NAT gateway per subnet:
+      RouteTableId: !Ref PrivateRouteTable3A
+      SubnetId: !Ref PrivateSubnet3B
+  PrivateRouteAssociation3C:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePrivate3Subnets
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable3A
+      SubnetId: !Ref PrivateSubnet3C
+
+
+  ########################################
+  # Attach Subnets (for Transit Gateway) #
+  ########################################
+
+  AttachSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: ConnectToTransitGateway
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 0, !GetAtt SubnetCalculator.TGW ]
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} (DO NOT USE) TGW Attach Subnet A
+        - !If
+          - ConnectToTransitGateway
+          - Key: Attach-to-tgw
+            Value: ""
+          - !Ref AWS::NoValue
+
+  AttachSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: ConnectToTransitGateway
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 1, !GetAtt SubnetCalculator.TGW ]
+      AvailabilityZone: !Select [ 1, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} (DO NOT USE) TGW Attach Subnet B
+        - !If
+          - ConnectToTransitGateway
+          - Key: Attach-to-tgw
+            Value: ""
+          - !Ref AWS::NoValue
+
+  AttachSubnetC:
+    Type: AWS::EC2::Subnet
+    Condition: ConnectToTransitGateway
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 2, !GetAtt SubnetCalculator.TGW ]
+      AvailabilityZone: !Select [ 2, "Fn::GetAZs" : "" ] 
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} (DO NOT USE) TGW Attach Subnet C
+        - !If
+          - ConnectToTransitGateway
+          - Key: Attach-to-tgw
+            Value: ""
+          - !Ref AWS::NoValue
+
+  # Route tables:
+  AttachRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: ConnectToTransitGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} TGW Attach route table
+       
+
+  # Route assocations:
+  AttachRouteAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ConnectToTransitGateway
+    Properties:
+      RouteTableId: !Ref AttachRouteTable
+      SubnetId: !Ref AttachSubnetA
+  AttachRouteAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ConnectToTransitGateway
+    Properties:
+      RouteTableId: !Ref AttachRouteTable
+      SubnetId: !Ref AttachSubnetB
+  AttachRouteAssociatioC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ConnectToTransitGateway
+    Properties:
+      RouteTableId: !Ref AttachRouteTable
+      SubnetId: !Ref AttachSubnetC
+
+
+  #############################################
+  # Private subnet route to TGW (conditional) #
+  #############################################
+
+  # Wait for STNO to create the TGW attachment on all AZs:
+  WaitForTGWAttachment:
+    Type: Custom::TGWAttachmentWait
+    Condition: ConnectToTransitGateway
+    DependsOn: AttachSubnetA
+    Properties:
+      ServiceToken: !GetAtt TGWAttachmentWait.Arn
+      TransitGatewayId: !FindInMap [ Variables, TransitGatewayID, Value ]
+      VpcId: !Ref VPC
+      AZs: 3
+      Timeout: 600
+
+  # Main private route table:
+  PrivateTransitGatewayDefaultRoute1A:
+    Type: AWS::EC2::Route
+    DependsOn: WaitForTGWAttachment
+    Condition: UseSharedNATGateways
+    Properties:
+      TransitGatewayId: !FindInMap [ Variables, TransitGatewayID, Value ]
+      RouteTableId: !Ref PrivateRouteTable1A
+      DestinationCidrBlock: 0.0.0.0/0    
+
+  # Second set of private route table:
+  PrivateTransitGatewayDefaultRoute2A:
+    Type: AWS::EC2::Route
+    DependsOn: WaitForTGWAttachment
+    Condition: CreatePrivate2Subnets&UseSharedNATGateways
+    Properties:
+      TransitGatewayId: !FindInMap [ Variables, TransitGatewayID, Value ]
+      RouteTableId: !Ref PrivateRouteTable2A
+      DestinationCidrBlock: 0.0.0.0/0
+
+  # Third set of private route table:
+  PrivateTransitGatewayDefaultRoute3A:
+    Type: AWS::EC2::Route
+    DependsOn: WaitForTGWAttachment
+    Condition: CreatePrivate3Subnets&ConnectToTransitGateway
+    Properties:
+      TransitGatewayId: !FindInMap [ Variables, TransitGatewayID, Value ]
+      RouteTableId: !Ref PrivateRouteTable3A
+      DestinationCidrBlock: 0.0.0.0/0
+
+
+  ##################
+  # Public Subnets #
+  ##################
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreatePublicSubnets
+    Properties:
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} Internet Gateway
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreatePublicSubnets
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 0, !GetAtt SubnetCalculator.Public ]
+      AvailabilityZone: !Select [ 0, "Fn::GetAZs" : "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${PublicSubnetLabel}A
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 1, !GetAtt SubnetCalculator.Public ]
+      AvailabilityZone: !Select [ 1, "Fn::GetAZs" : "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${PublicSubnetLabel}B
+          
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Condition: CreatePublicSubnets
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Select [ 2, !GetAtt SubnetCalculator.Public ]
+      AvailabilityZone: !Select [ 2, "Fn::GetAZs" : "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${VPCName} ${PublicSubnetLabel}C
+
+  # Route tables:
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreatePublicSubnets
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+          - Key: Name
+            Value: !Sub ${VPCName} ${PublicSubnetLabel} route table
+
+  PublicRouteDefault:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Condition: CreatePublicSubnets
+    Properties:
+        GatewayId: !Ref InternetGateway
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+
+  # Route assocations:
+  PublicRouteAssociationA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnets
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+  PublicRouteAssociationB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnets
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+  PublicRouteAssociationC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreatePublicSubnets
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetC           
+
+
+  ##########################
+  # Dedicated NAT Gateways #
+  ##########################
+
+  NATElasticIPA:
+    Type: AWS::EC2::EIP
+    Condition: UseDedicatedNATGateways
+    Properties:
+        Domain: !Ref VPC
+  NATElasticIPB:
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: !Ref VPC
+  NATElasticIPC:
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: !Ref VPC
+
+  NATGatewayA:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PublicRouteAssociationA
+    Condition: UseDedicatedNATGateways
+    Properties:
+      AllocationId: !GetAtt NATElasticIPA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+  NATGatewayB:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PublicRouteAssociationB
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      AllocationId: !GetAtt NATElasticIPB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+  NATGatewayC:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PublicRouteAssociationC
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      AllocationId: !GetAtt NATElasticIPC.AllocationId
+      SubnetId: !Ref PublicSubnetC
+
+
+  # Default route to NAT gateway if not using shared NAT gateways
+  PrivateNATGatewayRoute1A:
+    Type: AWS::EC2::Route
+    Condition: UseDedicatedNATGateways
+    Properties:
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref PrivateRouteTable1A
+      DestinationCidrBlock: 0.0.0.0/0
+  # Rest only create if the NAT is multi-AZ
+  PrivateNATGatewayRoute1B:
+    Type: AWS::EC2::Route
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      NatGatewayId: !Ref NATGatewayB
+      RouteTableId: !Ref PrivateRouteTable1B
+      DestinationCidrBlock: 0.0.0.0/0
+  PrivateNATGatewayRoute1C:
+    Type: AWS::EC2::Route
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      NatGatewayId: !Ref NATGatewayC
+      RouteTableId: !Ref PrivateRouteTable1C
+      DestinationCidrBlock: 0.0.0.0/0      
+
+  # Additional subnets:
+  PrivateNATGatewayRoute2A:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways
+    Properties:
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref PrivateRouteTable2A
+      DestinationCidrBlock: 0.0.0.0/0
+  # Rest only create if the NAT is multi-AZ
+  PrivateNATGatewayRoute2B:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      NatGatewayId: !Ref NATGatewayB
+      RouteTableId: !Ref PrivateRouteTable2B
+      DestinationCidrBlock: 0.0.0.0/0
+  PrivateNATGatewayRoute2C:
+    Type: AWS::EC2::Route
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Properties:
+      NatGatewayId: !Ref NATGatewayC
+      RouteTableId: !Ref PrivateRouteTable2C
+      DestinationCidrBlock: 0.0.0.0/0     
+
+  #########################
+  # Gateway VPC Endpoints #
+  #########################
+
+  VPCGatewayEndpointS3:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      RouteTableIds:
+        - !Ref PrivateRouteTable1A
+        - !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1B, !Ref "AWS::NoValue" ]
+        - !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1C, !Ref "AWS::NoValue" ]
+        - !If [ CreatePublicSubnets, !Ref PublicRouteTable, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets, !Ref PrivateRouteTable2A, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2B, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2C, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate3Subnets, !Ref PrivateRouteTable3A, !Ref "AWS::NoValue" ]
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcId: !Ref VPC
+
+  VPCGatewayEndpointDynamoDB:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      RouteTableIds:
+        - !Ref PrivateRouteTable1A
+        - !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1B, !Ref "AWS::NoValue" ]
+        - !If [ UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable1C, !Ref "AWS::NoValue" ]
+        - !If [ CreatePublicSubnets, !Ref PublicRouteTable, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets, !Ref PrivateRouteTable2A, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2B, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ, !Ref PrivateRouteTable2C, !Ref "AWS::NoValue" ]
+        - !If [ CreatePrivate3Subnets, !Ref PrivateRouteTable3A, !Ref "AWS::NoValue" ]
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcId: !Ref VPC
+
+
+  #########
+  # Misc #
+  ########
+ 
+  # VPC Flow Logs to central bucket
+  VPCFlowLogs:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      LogDestinationType: s3
+      MaxAggregationInterval: 600
+      LogDestination: !Sub 
+        - arn:aws:s3:::${VPCFlowLogBucket}/${VPCFlowLogPrefix}/
+        - VPCFlowLogBucket: !FindInMap [ Variables, VPCFlowLogBucket, Value ]
+          VPCFlowLogPrefix: !FindInMap [ Variables, VPCFlowLogPrefix, Value ]
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+
+  # DNS Private zone:
+  Route53PrivateHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref PrivateDomainName
+      HostedZoneConfig:
+        Comment: !Sub ${VPCName} Private hosted zone
+      VPCs:
+        - VPCId: !Ref VPC
+          VPCRegion: !Ref AWS::Region
+
+
+  #################
+  # SNTO TGW wait #
+  #################
+
+  # After CloudFormation tags the attach subnets with the 'Attach-to-tgw' tag, STNO:
+  # https://aws.amazon.com/solutions/serverless-transit-network-orchestrator/
+  # (running from the network account) will work in the background to start creating 
+  # the Transit Gateway VPC attachments.
+  # Until this finishes, we won't be able to create a route  in the subnet route 
+  # table to the TGW. So this Lambda Custom Resource waits until the given
+  # TGW ID and VPC ID have an attachment in the 'available' state. 
+  # This also deletes the TGW attachment if the stack is deleted.
+
+  TGWAttachmentWaitLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: ConnectToTransitGateway
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: TGWWait
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeTransitGatewayVpcAttachments
+                  - ec2:DeleteTransitGatewayVpcAttachment
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+
+  TGWAttachmentWait:
+    Type: AWS::Lambda::Function
+    Condition: ConnectToTransitGateway
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt TGWAttachmentWaitLambdaRole.Arn
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import boto3
+          from botocore.config import Config
+          import cfnresponse
+          import traceback
+          import time
+
+          boto3_config = Config(retries={'max_attempts': 10, 'mode': 'standard'})
+          ec2 = boto3.client('ec2', config=boto3_config)
+
+          def get_tgw_attachments(tgw_id, vpc_id, states=[], subnet_count=0):
+            filters = [
+              {'Name':'transit-gateway-id','Values':[tgw_id]},
+              {'Name':'vpc-id','Values':[vpc_id]},
+            ]
+            if len(states) > 0:
+              filters.append({'Name':'state','Values': states })
+            response = ec2.describe_transit_gateway_vpc_attachments(Filters=filters)
+            attachments = response['TransitGatewayVpcAttachments']
+
+            if subnet_count != 0 and len(attachments) > 0:
+              attachment_subnet_ids = attachments[0]['SubnetIds']
+              attachment_subnet_count = len(attachment_subnet_ids)
+              print(f'There are {attachment_subnet_count} subnets in the TGW attachment')
+              if subnet_count != attachment_subnet_count:
+                return []
+
+            return attachments 
+
+          # Wait until the TGW attachment is in the given state
+          def wait_until_tgw_attachment(states, tgw_id, vpc_id, timeout, subnet_count=0):
+            timeout_start = time.time()
+            while time.time() < timeout_start + timeout:
+              attachments = get_tgw_attachments(tgw_id, vpc_id, states=states, subnet_count=subnet_count)
+              if len(attachments) > 0:
+                return True
+              print(f'Waiting for TGW attachments in state {states}...')
+              time.sleep(5)
+            return False
+
+          def handler(event, context):
+            response_payload = {}
+            response_status = cfnresponse.FAILED
+            physical_resource_id = "unset"
+
+            print(f"event is {event}")
+
+            if 'PhysicalResourceId' in event:
+              existing_physical_resource_id = event['PhysicalResourceId']
+              print(f"existing_physical_resource_id is {existing_physical_resource_id}")
+
+            try:
+              if event['RequestType'] == 'Delete':
+                physical_resource_id = existing_physical_resource_id
+                print(f'Deleting physical_resource_id {physical_resource_id}...')
+                # Always give success on deletion requests, otherwise the stack will get unstable:
+                response_status = cfnresponse.SUCCESS
+
+                # existing vpc & tgw is separated by a colon
+                vpc_id = physical_resource_id.split(':')[0]
+                tgw_id = physical_resource_id.split(':')[1]
+                timeout = int(event['ResourceProperties']['Timeout'])
+
+                in_progress_attachments = get_tgw_attachments(tgw_id, vpc_id,
+                  states=['modifying', 'pendingAcceptance', 'pending', 'rollingBack'] )
+                if len(in_progress_attachments) > 0:
+                  print(f'There are some in progress attachments: {in_progress_attachments}')
+                  wait_until_tgw_attachment(['available'], tgw_id, vpc_id, timeout)
+
+                # Get available attachment if any and delete it:
+                attachments = get_tgw_attachments(tgw_id, vpc_id, states=['available'])
+                if len(attachments) > 0:
+                  attachment_id = attachments[0]['TransitGatewayAttachmentId']
+                  print(f'Deleting attachment {attachment_id}')
+                  ec2.delete_transit_gateway_vpc_attachment(TransitGatewayAttachmentId=attachment_id)
+                  success = wait_until_tgw_attachment(['deleted'], tgw_id, vpc_id, timeout)
+                  
+                  if success:
+                    print('Successfully deleted attachment.')
+                  else:
+                    print('Warning: timed out while trying to delete')
+              
+              else:
+                # Create or Update:
+                event_type = event['RequestType']
+                prop = event['ResourceProperties']
+                print(f'{event_type} event received...')                
+
+                vpc_id = prop['VpcId']
+                tgw_id = prop['TransitGatewayId']
+                azs = int(prop['AZs'])
+                timeout = int(prop['Timeout'])
+
+                physical_resource_id = f'{vpc_id}:{tgw_id}'
+                print(f'physical_resource_id is {physical_resource_id}')
+
+                status = wait_until_tgw_attachment(['available'], tgw_id, vpc_id, timeout, subnet_count=azs)
+                if status:
+                  response_status = cfnresponse.SUCCESS
+
+            except Exception as e:
+              print('ERROR: Caught exception:')
+              print(e)
+              traceback.print_exc()
+
+            finally:
+              print('Sending cfn response')
+              cfnresponse.send(event, context, response_status, response_payload, physical_resource_id)
+
+  TGWLogGroupKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      EnableKeyRotation: True
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: tgw-log-group-key
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+
+  TGWAttachmentWaitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ConnectToTransitGateway
+    Properties:
+        LogGroupName: !Sub "/aws/lambda/${TGWAttachmentWait}"
+        RetentionInDays: 30
+        KmsKeyId: !GetAtt TGWLogGroupKey.Arn
+
+
+Outputs:
+  VPC:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+
+  VPCName:
+    Description: VPC Name
+    Value: !Ref VPCName
+    Export:
+      Name: !Sub ${AWS::StackName}-VPCName
+
+  TransitGatewayID:
+    Description: Transit Gateway ID
+    Condition: ConnectToTransitGateway
+    Value: !FindInMap [ Variables, TransitGatewayID, Value ]
+    Export:
+      Name: !Sub ${AWS::StackName}-TransitGatewayID
+
+  PrivateSubnet1A:
+    Description: PrivateSubnet1A
+    Value: !Ref PrivateSubnet1A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1A
+
+  PrivateSubnet1B:
+    Description: PrivateSubnet1B
+    Value: !Ref PrivateSubnet1B
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1B
+
+  PrivateSubnet1C:
+    Description: PrivateSubnet1C
+    Value: !Ref PrivateSubnet1C
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet1C
+
+  PrivateRouteTable1A:
+    Description: PrivateRouteTable1A
+    Value: !Ref PrivateRouteTable1A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable1A
+
+  PrivateRouteTable1B:
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Description: PrivateRouteTable1B
+    Value: !Ref PrivateRouteTable1B
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable1B
+
+  PrivateRouteTable1C:
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Description: PrivateRouteTable1C
+    Value: !Ref PrivateRouteTable1C
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable1C
+
+  PrivateSubnet2A:
+    Condition: CreatePrivate2Subnets
+    Description: PrivateSubnet2A
+    Value: !Ref PrivateSubnet2A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2A
+
+  PrivateSubnet2B:
+    Condition: CreatePrivate2Subnets
+    Description: PrivateSubnet2B
+    Value: !Ref PrivateSubnet2B
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2B
+
+  PrivateSubnet2C:
+    Condition: CreatePrivate2Subnets
+    Description: PrivateSubnet2C
+    Value: !Ref PrivateSubnet2C
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet2C
+
+  PrivateRouteTable2A:
+    Condition: CreatePrivate2Subnets
+    Description: PrivateRouteTable2A
+    Value: !Ref PrivateRouteTable2A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable2A
+
+  PrivateRouteTable2B:
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Description: PrivateRouteTable2B
+    Value: !Ref PrivateRouteTable2B
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable2B
+
+  PrivateRouteTable2C:
+    Condition: CreatePrivate2Subnets&UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Description: PrivateRouteTable2C
+    Value: !Ref PrivateRouteTable2C
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable2C
+
+  PrivateSubnet3A:
+    Condition: CreatePrivate3Subnets
+    Description: PrivateSubnet3A
+    Value: !Ref PrivateSubnet3A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet3A
+
+  PrivateSubnet3B:
+    Condition: CreatePrivate3Subnets
+    Description: PrivateSubnet3B
+    Value: !Ref PrivateSubnet3B
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet3B
+
+  PrivateSubnet3C:
+    Condition: CreatePrivate3Subnets
+    Description: PrivateSubnet3C
+    Value: !Ref PrivateSubnet3C
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateSubnet3C
+
+  PrivateRouteTable3A:
+    Condition: CreatePrivate3Subnets
+    Description: PrivateRouteTable3A
+    Value: !Ref PrivateRouteTable3A
+    Export:
+      Name: !Sub ${AWS::StackName}-PrivateRouteTable3A
+
+  AttachSubnetA:
+    Condition: ConnectToTransitGateway
+    Description: AttachSubnetA
+    Value: !Ref AttachSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-AttachSubnetA
+
+  AttachSubnetB:
+    Condition: ConnectToTransitGateway
+    Description: AttachSubnetB
+    Value: !Ref AttachSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-AttachSubnetB
+
+  AttachSubnetC:
+    Condition: ConnectToTransitGateway
+    Description: AttachSubnetC
+    Value: !Ref AttachSubnetC
+    Export:
+      Name: !Sub ${AWS::StackName}-AttachSubnetC
+
+  AttachRouteTable:
+    Condition: ConnectToTransitGateway
+    Description: AttachRouteTable
+    Value: !Ref AttachRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AttachRouteTable
+
+  PublicSubnetA:
+    Description: PublicSubnetA
+    Condition: CreatePublicSubnets
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetA
+
+  PublicSubnetB:
+    Description: PublicSubnetB
+    Condition: CreatePublicSubnets
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetB
+
+  PublicSubnetC:
+    Description: PublicSubnetC
+    Condition: CreatePublicSubnets
+    Value: !Ref PublicSubnetC
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicSubnetC
+      
+  NATElasticIPA:
+    Description: NATElasticIPA
+    Condition: UseDedicatedNATGateways
+    Value: !Ref NATElasticIPA
+    Export:
+      Name: !Sub ${AWS::StackName}-NATElasticIPA
+
+  NATElasticIPB:
+    Description: NATElasticIPB
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Value: !Ref NATElasticIPB
+    Export:
+      Name: !Sub ${AWS::StackName}-NATElasticIPB
+
+  NATElasticIPC:
+    Description: NATElasticIPC
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Value: !Ref NATElasticIPC
+    Export:
+      Name: !Sub ${AWS::StackName}-NATElasticIPC
+
+  NATGatewayA:
+    Description: NATGatewayA
+    Condition: UseDedicatedNATGateways
+    Value: !Ref NATGatewayA
+    Export:
+      Name: !Sub ${AWS::StackName}-NATGatewayA
+
+  NATGatewayB:
+    Description: NATGatewayB
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Value: !Ref NATGatewayB
+    Export:
+      Name: !Sub ${AWS::StackName}-NATGatewayB
+
+  NATGatewayC:
+    Description: NATGatewayC
+    Condition: UseDedicatedNATGateways&HaveNATGatewaysPerAZ
+    Value: !Ref NATGatewayC
+    Export:
+      Name: !Sub ${AWS::StackName}-NATGatewayC
+
+  PublicRouteTable:
+    Description: PublicRouteTable
+    Condition: CreatePublicSubnets
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub ${AWS::StackName}-PublicRouteTable
